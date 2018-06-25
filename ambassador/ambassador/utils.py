@@ -1,12 +1,50 @@
 #!/usr/bin/env python
-
-import sys
-
+import binascii
 import socket
 import threading
 import time
+import os
+import logging
+
+from kubernetes import client, config
+from enum import Enum
 
 from .VERSION import Version
+
+logger = logging.getLogger("utils")
+logger.setLevel(logging.INFO)
+
+
+class TLSPaths(Enum):
+    cert_dir = "/etc/certs"
+    tls_crt = os.path.join(cert_dir, "tls.crt")
+    tls_key = os.path.join(cert_dir, "tls.key")
+    client_cert_dir = "/etc/cacert"
+    client_tls_crt = os.path.join(client_cert_dir, "tls.crt")
+
+def kube_v1():
+    # Assume we got nothin'.
+    k8s_api = None
+
+    # XXX: is there a better way to check if we are inside a cluster or not?
+    if "KUBERNETES_SERVICE_HOST" in os.environ:
+        # If this goes horribly wrong and raises an exception (it shouldn't),
+        # we'll crash, and Kubernetes will kill the pod. That's probably not an
+        # unreasonable response.
+        config.load_incluster_config()
+        k8s_api = client.CoreV1Api()
+    else:
+        # Here, we might be running in docker, in which case we'll likely not
+        # have any Kube secrets, and that's OK.
+        try:
+            config.load_kube_config()
+            k8s_api = client.CoreV1Api()
+        except FileNotFoundError:
+            # Meh, just ride through.
+            logger.info("No K8s")
+            pass
+
+    return k8s_api
 
 class SystemInfo (object):
     MyHostName = socket.gethostname()
@@ -130,3 +168,45 @@ class PeriodicTrigger(threading.Thread):
         while True:
             time.sleep(self.period)
             self.onfired()
+
+
+def read_cert_secret(secret_name):
+    namespace = os.environ.get('AMBASSADOR_NAMESPACE', 'default')
+    k8s_api = kube_v1()
+    cert_data = None
+    cert = None
+    key = None
+
+    try:
+        cert_data = k8s_api.read_namespaced_secret(secret_name, namespace)
+    except client.rest.ApiException as e:
+        if e.reason == "Not Found":
+            pass
+        else:
+            logger.info("secret %s/%s could not be read: %s" % (namespace, secret_name, e))
+
+    if cert_data and cert_data.data:
+        cert_data = cert_data.data
+        cert = cert_data.get('tls.crt', None)
+
+        if cert:
+            cert = binascii.a2b_base64(cert)
+
+        key = cert_data.get('tls.key', None)
+
+        if key:
+            key = binascii.a2b_base64(key)
+
+    return cert, key, cert_data
+
+
+def save_cert(cert, key, dir):
+    try:
+        os.makedirs(dir)
+    except FileExistsError:
+        pass
+
+    open(os.path.join(dir, "tls.crt"), "w").write(cert.decode("utf-8"))
+
+    if key:
+        open(os.path.join(dir, "tls.key"), "w").write(key.decode("utf-8"))

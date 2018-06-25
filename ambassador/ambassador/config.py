@@ -15,7 +15,7 @@ from pkg_resources import Requirement, resource_filename
 
 from jinja2 import Environment, FileSystemLoader
 
-from .utils import RichStatus, SourcedDict
+from .utils import RichStatus, SourcedDict, read_cert_secret, save_cert, TLSPaths
 from .mapping import Mapping
 
 from scout import Scout
@@ -1312,6 +1312,16 @@ class Config (object):
                     # ...and merge in the server-side defaults.
                     tmp_config.update(self.default_tls_config['server'])
                     tmp_config.update(tmod['server'])
+
+                     # Check if secrets are supplied for TLS termination and/or TLS auth
+                    secret = context.get('secret')
+                    if secret is not None:
+                        self.logger.info("config.server.secret is {}".format(secret))
+                        (server_cert, server_key, server_data) = read_cert_secret(secret)
+                        if server_cert and server_key:
+                            self.logger.info("saving server cert")
+                            save_cert(server_cert, server_key, TLSPaths.cert_dir.value)
+
                 elif context_name == 'client':
                     # Client-side TLS is enabled.
                     self.logger.debug("TLS client certs enabled!")
@@ -1320,6 +1330,15 @@ class Config (object):
                     # Merge in the client-side defaults.
                     tmp_config.update(self.default_tls_config['client'])
                     tmp_config.update(tmod['client'])
+
+                    secret = context.get('secret')
+                    if secret is not None:
+                        self.logger.info("config.client.secret is {}".format(secret))
+                        (client_cert, _, _) = read_cert_secret(secret)
+                        if client_cert:
+                            self.logger.info("saving client cert")
+                            save_cert(client_cert, None, TLSPaths.client_cert_dir.value)
+
                 else:
                     # This is a wholly new thing.
                     self.tls_contexts[context_name] = SourcedDict(
